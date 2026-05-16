@@ -1,0 +1,1310 @@
+openapi: 3.1.0
+info:
+  title: Bella Command Center API
+  description: Backend API for the Bella Command Center evidence management platform.
+  version: 1.0.0
+  contact:
+    name: Silent Dreamz Studio
+servers:
+  - url: /api
+    description: Default API root
+
+components:
+  parameters:
+    WorkspaceId:
+      name: X-Workspace-Id
+      in: header
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Workspace tenant identifier
+    EvidenceId:
+      name: evidenceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IncidentId:
+      name: incidentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    PacketId:
+      name: packetId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    DraftId:
+      name: draftId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CursorParam:
+      name: cursor
+      in: query
+      required: false
+      schema:
+        type: string
+      description: Opaque cursor for pagination
+    LimitParam:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        default: 50
+        minimum: 1
+        maximum: 200
+
+  schemas:
+    # ---------- Common ----------
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: bcc-api
+
+    JobEnqueueResponse:
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued]
+
+    ExportArtifact:
+      type: object
+      required: [id, workspace_id, source_type, source_id, format, status, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        source_type:
+          type: string
+          enum: [packet, draft]
+        source_id:
+          type: string
+          format: uuid
+        format:
+          type: string
+          enum: [pdf, docx, zip]
+        status:
+          type: string
+          enum: [queued, processing, completed, failed]
+        object_key:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    ExportListResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExportArtifact'
+        next_cursor:
+          type: string
+          nullable: true
+
+    # ---------- Evidence ----------
+    EvidenceType:
+      type: string
+      enum: [document, image, video, audio, email, log, other]
+
+    EvidenceCreateRequest:
+      type: object
+      required: [filename, evidence_type]
+      properties:
+        filename:
+          type: string
+        evidence_type:
+          $ref: '#/components/schemas/EvidenceType'
+        mime_type:
+          type: string
+        description:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+
+    EvidenceUpdateRequest:
+      type: object
+      properties:
+        description:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+
+    EvidenceItem:
+      type: object
+      required: [id, workspace_id, filename, evidence_type, object_key, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        filename:
+          type: string
+        evidence_type:
+          $ref: '#/components/schemas/EvidenceType'
+        mime_type:
+          type: string
+          nullable: true
+        description:
+          type: string
+          nullable: true
+        tags:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          nullable: true
+        object_key:
+          type: string
+        status:
+          type: string
+          enum: [pending_upload, uploading, processing, indexed, failed]
+        size_bytes:
+          type: integer
+          nullable: true
+        sha256:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    EvidenceListResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/EvidenceItem'
+        next_cursor:
+          type: string
+          nullable: true
+
+    PresignRequest:
+      type: object
+      properties:
+        content_type:
+          type: string
+          default: application/octet-stream
+
+    PresignResponse:
+      type: object
+      required: [upload_url, object_key, expires_in]
+      properties:
+        upload_url:
+          type: string
+          format: uri
+        object_key:
+          type: string
+        expires_in:
+          type: integer
+          description: Seconds until URL expires
+
+    EvidenceFinalizeRequest:
+      type: object
+      properties:
+        sha256:
+          type: string
+        size_bytes:
+          type: integer
+
+    # ---------- Incidents ----------
+    IncidentCreateRequest:
+      type: object
+      required: [title]
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+          default: medium
+        tags:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+
+    IncidentUpdateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        status:
+          type: string
+          enum: [open, investigating, contained, resolved, closed]
+        tags:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+
+    Incident:
+      type: object
+      required: [id, workspace_id, title, severity, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+          nullable: true
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        status:
+          type: string
+          enum: [open, investigating, contained, resolved, closed]
+        tags:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    IncidentListResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Incident'
+        next_cursor:
+          type: string
+          nullable: true
+
+    IncidentLinkEvidenceRequest:
+      type: object
+      required: [evidence_id]
+      properties:
+        evidence_id:
+          type: string
+          format: uuid
+        notes:
+          type: string
+
+    # ---------- Packets ----------
+    PacketType:
+      type: string
+      enum: [investigation, compliance, legal, report, other]
+
+    PacketStatus:
+      type: string
+      enum: [draft, review, approved, exported, archived]
+
+    PacketCreateRequest:
+      type: object
+      required: [title, packet_type]
+      properties:
+        title:
+          type: string
+        packet_type:
+          $ref: '#/components/schemas/PacketType'
+        description:
+          type: string
+        metadata:
+          type: object
+
+    PacketUpdateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          $ref: '#/components/schemas/PacketStatus'
+        metadata:
+          type: object
+
+    Packet:
+      type: object
+      required: [id, workspace_id, title, packet_type, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        packet_type:
+          $ref: '#/components/schemas/PacketType'
+        description:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/PacketStatus'
+        metadata:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    PacketListResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Packet'
+        next_cursor:
+          type: string
+          nullable: true
+
+    AddExhibitRequest:
+      type: object
+      required: [evidence_id]
+      properties:
+        evidence_id:
+          type: string
+          format: uuid
+        label:
+          type: string
+        sort_order:
+          type: integer
+          default: 0
+
+    ExportPacketRequest:
+      type: object
+      properties:
+        format:
+          type: string
+          enum: [pdf, docx, zip]
+          default: pdf
+
+    # ---------- Drafts ----------
+    DraftType:
+      type: string
+      enum: [summary, timeline, analysis, memo, report, other]
+
+    DraftStatus:
+      type: string
+      enum: [queued, generating, ready, approved, rejected]
+
+    DraftGenerateRequest:
+      type: object
+      required: [draft_type, incident_id]
+      properties:
+        draft_type:
+          $ref: '#/components/schemas/DraftType'
+        incident_id:
+          type: string
+          format: uuid
+        prompt:
+          type: string
+        evidence_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        metadata:
+          type: object
+
+    DraftUpdateRequest:
+      type: object
+      properties:
+        title:
+          type: string
+        body:
+          type: string
+        metadata:
+          type: object
+
+    DraftStatusUpdateRequest:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [approved, rejected]
+        reason:
+          type: string
+
+    Draft:
+      type: object
+      required: [id, workspace_id, draft_type, incident_id, status, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        draft_type:
+          $ref: '#/components/schemas/DraftType'
+        incident_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          nullable: true
+        body:
+          type: string
+          nullable: true
+        prompt:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/DraftStatus'
+        evidence_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+        metadata:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    DraftListResponse:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Draft'
+        next_cursor:
+          type: string
+          nullable: true
+
+    # ---------- Citations ----------
+    CitationCreateRequest:
+      type: object
+      required: [evidence_id, excerpt]
+      properties:
+        evidence_id:
+          type: string
+          format: uuid
+        excerpt:
+          type: string
+        page:
+          type: integer
+          nullable: true
+        start_offset:
+          type: integer
+          nullable: true
+        end_offset:
+          type: integer
+          nullable: true
+        metadata:
+          type: object
+
+    CitationAnchor:
+      type: object
+      required: [id, workspace_id, evidence_id, excerpt, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        workspace_id:
+          type: string
+          format: uuid
+        evidence_id:
+          type: string
+          format: uuid
+        excerpt:
+          type: string
+        page:
+          type: integer
+          nullable: true
+        start_offset:
+          type: integer
+          nullable: true
+        end_offset:
+          type: integer
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    DraftCitationAttachRequest:
+      type: object
+      required: [citation_id, anchor_text]
+      properties:
+        citation_id:
+          type: string
+          format: uuid
+        anchor_text:
+          type: string
+        position:
+          type: integer
+          nullable: true
+
+    # ---------- Search ----------
+    SearchResult:
+      type: object
+      required: [id, source, score, snippet]
+      properties:
+        id:
+          type: string
+          format: uuid
+        source:
+          type: string
+          enum: [evidence, draft, incident]
+        score:
+          type: number
+          format: float
+        snippet:
+          type: string
+        metadata:
+          type: object
+
+    SearchResponse:
+      type: object
+      required: [results, total, mode]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SearchResult'
+        total:
+          type: integer
+        mode:
+          type: string
+          enum: [fulltext, semantic, hybrid]
+
+paths:
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health check
+      tags: [health]
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /evidence:
+    get:
+      operationId: listEvidence
+      summary: List evidence items
+      tags: [evidence]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: evidence_type
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/EvidenceType'
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [pending_upload, uploading, processing, indexed, failed]
+        - name: tag
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Paginated evidence list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceListResponse'
+    post:
+      operationId: createEvidence
+      summary: Create new evidence record
+      tags: [evidence]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvidenceCreateRequest'
+      responses:
+        '201':
+          description: Evidence created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceItem'
+
+  /evidence/{evidenceId}:
+    get:
+      operationId: getEvidence
+      summary: Get evidence by ID
+      tags: [evidence]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/EvidenceId'
+      responses:
+        '200':
+          description: Evidence item
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceItem'
+        '404':
+          description: Not found
+    patch:
+      operationId: updateEvidence
+      summary: Update evidence metadata
+      tags: [evidence]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/EvidenceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvidenceUpdateRequest'
+      responses:
+        '200':
+          description: Updated evidence
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EvidenceItem'
+        '404':
+          description: Not found
+
+  /evidence/{evidenceId}/upload-url:
+    post:
+      operationId: getEvidenceUploadUrl
+      summary: Generate presigned upload URL
+      tags: [evidence]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/EvidenceId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresignRequest'
+      responses:
+        '200':
+          description: Presigned URL
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignResponse'
+
+  /evidence/{evidenceId}/finalize:
+    post:
+      operationId: finalizeEvidence
+      summary: Mark evidence upload complete and trigger processing
+      tags: [evidence]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/EvidenceId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvidenceFinalizeRequest'
+      responses:
+        '202':
+          description: Processing enqueued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobEnqueueResponse'
+
+  /incidents:
+    get:
+      operationId: listIncidents
+      summary: List incidents
+      tags: [incidents]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: severity
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [low, medium, high, critical]
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [open, investigating, contained, resolved, closed]
+      responses:
+        '200':
+          description: Paginated incident list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IncidentListResponse'
+    post:
+      operationId: createIncident
+      summary: Create new incident
+      tags: [incidents]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncidentCreateRequest'
+      responses:
+        '201':
+          description: Incident created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Incident'
+
+  /incidents/{incidentId}:
+    get:
+      operationId: getIncident
+      summary: Get incident by ID
+      tags: [incidents]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IncidentId'
+      responses:
+        '200':
+          description: Incident
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Incident'
+        '404':
+          description: Not found
+    patch:
+      operationId: updateIncident
+      summary: Update incident
+      tags: [incidents]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IncidentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncidentUpdateRequest'
+      responses:
+        '200':
+          description: Updated incident
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Incident'
+        '404':
+          description: Not found
+
+  /incidents/{incidentId}/evidence:
+    post:
+      operationId: linkEvidenceToIncident
+      summary: Link evidence to incident
+      tags: [incidents]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IncidentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncidentLinkEvidenceRequest'
+      responses:
+        '201':
+          description: Evidence linked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: linked
+    delete:
+      operationId: unlinkEvidenceFromIncident
+      summary: Unlink evidence from incident
+      tags: [incidents]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/IncidentId'
+        - name: evidence_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Evidence unlinked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: unlinked
+
+  /packets:
+    get:
+      operationId: listPackets
+      summary: List packets
+      tags: [packets]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: packet_type
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PacketType'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/PacketStatus'
+      responses:
+        '200':
+          description: Paginated packet list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PacketListResponse'
+    post:
+      operationId: createPacket
+      summary: Create new packet
+      tags: [packets]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PacketCreateRequest'
+      responses:
+        '201':
+          description: Packet created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Packet'
+
+  /packets/{packetId}:
+    get:
+      operationId: getPacket
+      summary: Get packet by ID
+      tags: [packets]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/PacketId'
+      responses:
+        '200':
+          description: Packet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Packet'
+        '404':
+          description: Not found
+    patch:
+      operationId: updatePacket
+      summary: Update packet
+      tags: [packets]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/PacketId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PacketUpdateRequest'
+      responses:
+        '200':
+          description: Updated packet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Packet'
+        '404':
+          description: Not found
+
+  /packets/{packetId}/exhibits:
+    post:
+      operationId: addExhibit
+      summary: Add exhibit to packet
+      tags: [packets]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/PacketId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddExhibitRequest'
+      responses:
+        '201':
+          description: Exhibit added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: added
+    delete:
+      operationId: removeExhibit
+      summary: Remove exhibit from packet
+      tags: [packets]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/PacketId'
+        - name: evidence_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Exhibit removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: removed
+
+  /packets/{packetId}/export:
+    post:
+      operationId: exportPacket
+      summary: Trigger packet export
+      tags: [packets]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/PacketId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportPacketRequest'
+      responses:
+        '202':
+          description: Export enqueued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobEnqueueResponse'
+
+  /drafts:
+    get:
+      operationId: listDrafts
+      summary: List drafts
+      tags: [drafts]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/DraftStatus'
+        - name: incident_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Paginated draft list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DraftListResponse'
+    post:
+      operationId: generateDraft
+      summary: Request AI draft generation
+      tags: [drafts]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftGenerateRequest'
+      responses:
+        '202':
+          description: Draft generation enqueued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobEnqueueResponse'
+
+  /drafts/{draftId}:
+    get:
+      operationId: getDraft
+      summary: Get draft by ID
+      tags: [drafts]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/DraftId'
+      responses:
+        '200':
+          description: Draft
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+        '404':
+          description: Not found
+    patch:
+      operationId: updateDraft
+      summary: Update draft content
+      tags: [drafts]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/DraftId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftUpdateRequest'
+      responses:
+        '200':
+          description: Updated draft
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+        '404':
+          description: Not found
+
+  /drafts/{draftId}/status:
+    post:
+      operationId: updateDraftStatus
+      summary: Approve or reject a draft
+      tags: [drafts]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/DraftId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftStatusUpdateRequest'
+      responses:
+        '200':
+          description: Status updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Draft'
+
+  /citations:
+    post:
+      operationId: createCitation
+      summary: Create a citation anchor
+      tags: [citations]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CitationCreateRequest'
+      responses:
+        '201':
+          description: Citation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CitationAnchor'
+
+  /drafts/{draftId}/citations:
+    post:
+      operationId: attachCitationToDraft
+      summary: Attach citation to draft
+      tags: [citations]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/DraftId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DraftCitationAttachRequest'
+      responses:
+        '201':
+          description: Citation attached
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: attached
+
+  /exports:
+    get:
+      operationId: listExports
+      summary: List export artifacts
+      tags: [exports]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - $ref: '#/components/parameters/CursorParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: packet_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+        - name: draft_id
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Paginated exports
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExportListResponse'
+
+  /search:
+    get:
+      operationId: search
+      summary: Hybrid search across evidence, drafts, incidents
+      tags: [search]
+      parameters:
+        - $ref: '#/components/parameters/WorkspaceId'
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: mode
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [fulltext, semantic, hybrid]
+            default: hybrid
+        - $ref: '#/components/parameters/LimitParam'
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResponse'

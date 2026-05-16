@@ -1,0 +1,1 @@
+{"vectors":{"size":768,"distance":"Cosine"},"optimizers_config":{"default_segment_number":2,"indexing_threshold":20000},"on_disk_payload":true}
