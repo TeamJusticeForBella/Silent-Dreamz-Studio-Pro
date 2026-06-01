@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Scale, Twitter, Instagram, Facebook, Youtube } from "lucide-react";
+import { Scale, Globe, ExternalLink, Share2, Rss } from "lucide-react";
 
 const footerSections = [
   {
@@ -41,10 +41,10 @@ const footerSections = [
 ];
 
 const socialLinks = [
-  { href: "https://twitter.com/BringBellaHome", icon: Twitter, label: "Twitter" },
-  { href: "https://instagram.com/bringbellahome", icon: Instagram, label: "Instagram" },
-  { href: "https://facebook.com/BringBellaHome", icon: Facebook, label: "Facebook" },
-  { href: "https://youtube.com/BringBellaHome", icon: Youtube, label: "YouTube" },
+  { href: "https://x.com/BellasArmy2026", icon: Globe, label: "X / Twitter" },
+  { href: "https://instagram.com/bringbellahome", icon: ExternalLink, label: "Instagram" },
+  { href: "https://facebook.com/BringBellaHome", icon: Share2, label: "Facebook" },
+  { href: "https://youtube.com/BringBellaHome", icon: Rss, label: "YouTube" },
 ];
 
 export default function Footer() {
