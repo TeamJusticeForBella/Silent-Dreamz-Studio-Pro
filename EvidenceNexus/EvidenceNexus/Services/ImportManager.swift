@@ -148,6 +148,32 @@ class ImportManager: ObservableObject {
         }
     }
 
+    // MARK: - YouTube
+    func importFromYouTube(urlString: String, title: String, notes: String, modelContext: ModelContext, appState: AppState) {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: trimmed),
+              trimmed.contains("youtube.com") || trimmed.contains("youtu.be") else {
+            appState.showError("Invalid YouTube URL. Please enter a valid youtube.com or youtu.be link.")
+            return
+        }
+
+        let item = EvidenceItem(
+            title: title.isEmpty ? "YouTube Video" : title,
+            description: notes.isEmpty ? "Imported from YouTube" : notes,
+            date: Date(),
+            type: .video,
+            fileURL: url,
+            originalSource: "YouTube"
+        )
+        item.metadata["youtubeURL"] = trimmed
+        item.metadata["platform"] = "YouTube"
+
+        modelContext.insert(item)
+        recentImports.insert(item, at: 0)
+
+        AuditLogger.shared.log(.evidenceImported, evidenceID: item.id.uuidString, details: trimmed)
+    }
+
     // MARK: - AI Processing
     private func processWithAI(item: EvidenceItem, fileURL: URL) async {
         // OCR for images and PDFs

@@ -14,11 +14,17 @@ struct ImportsView: View {
     @EnvironmentObject var appState: AppState
     @StateObject private var importManager = ImportManager()
 
+    @State private var showYouTubeSheet = false
+    @State private var youtubeURL = ""
+    @State private var youtubeTitle = ""
+    @State private var youtubeNotes = ""
+
     let connectors: [(String, String, String, Color)] = [
         ("Gmail", "envelope.fill", "Import from Gmail", .red),
         ("Outlook", "envelope.badge.fill", "Import from Outlook", .blue),
         ("Facebook", "f.square.fill", "Import from Facebook", .indigo),
         ("Instagram", "camera.fill", "Import from Instagram", .pink),
+        ("YouTube", "play.rectangle.fill", "Import YouTube link", Color(red: 1, green: 0, blue: 0)),
         ("Photos", "photo.on.rectangle", "Import from Photos", .purple),
         ("Files", "folder.fill", "Import documents", .orange),
         ("Voice Note", "mic.circle.fill", "Record voice note", .mint)
@@ -87,6 +93,25 @@ struct ImportsView: View {
             }
             .navigationTitle("Import")
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $showYouTubeSheet) {
+                YouTubeImportSheet(
+                    urlText: $youtubeURL,
+                    titleText: $youtubeTitle,
+                    notesText: $youtubeNotes
+                ) {
+                    importManager.importFromYouTube(
+                        urlString: youtubeURL,
+                        title: youtubeTitle,
+                        notes: youtubeNotes,
+                        modelContext: modelContext,
+                        appState: appState
+                    )
+                    youtubeURL = ""
+                    youtubeTitle = ""
+                    youtubeNotes = ""
+                    showYouTubeSheet = false
+                }
+            }
         }
     }
 
@@ -100,6 +125,8 @@ struct ImportsView: View {
             importManager.connectFacebook(appState: appState)
         case "Instagram":
             importManager.connectInstagram(appState: appState)
+        case "YouTube":
+            showYouTubeSheet = true
         case "Photos":
             importManager.importFromPhotos(modelContext: modelContext, appState: appState)
         case "Files":
@@ -108,6 +135,59 @@ struct ImportsView: View {
             importManager.startVoiceRecording(modelContext: modelContext, appState: appState)
         default:
             break
+        }
+    }
+}
+
+// MARK: - YouTube Import Sheet
+struct YouTubeImportSheet: View {
+    @Binding var urlText: String
+    @Binding var titleText: String
+    @Binding var notesText: String
+    let onImport: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+
+    var isValidURL: Bool {
+        let trimmed = urlText.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && (trimmed.contains("youtube.com") || trimmed.contains("youtu.be"))
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("https://youtube.com/watch?v=...", text: $urlText)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                        .textInputAutocapitalization(.never)
+                } header: {
+                    Text("YouTube URL")
+                } footer: {
+                    Text("Paste a youtube.com or youtu.be link. The URL is saved as evidence with full chain-of-custody logging.")
+                }
+
+                Section("Title (optional)") {
+                    TextField("Describe the video", text: $titleText)
+                }
+
+                Section("Notes (optional)") {
+                    TextField("Relevance to the case, timestamps of interest, etc.", text: $notesText, axis: .vertical)
+                        .lineLimit(4, reservesSpace: true)
+                }
+            }
+            .navigationTitle("Import YouTube Link")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Import") { onImport() }
+                        .disabled(!isValidURL)
+                        .bold()
+                }
+            }
         }
     }
 }
