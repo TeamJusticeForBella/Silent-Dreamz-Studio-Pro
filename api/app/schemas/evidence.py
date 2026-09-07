@@ -1,9 +1,20 @@
+import json
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
+
+
+def _coerce_json(v: Any) -> Any:
+    if isinstance(v, str):
+        return json.loads(v)
+    return v
+
+
+CoercedList = Annotated[list[str], BeforeValidator(_coerce_json)]
+CoercedDict = Annotated[dict[str, Any], BeforeValidator(_coerce_json)]
 
 
 class EvidenceType(str, Enum):
@@ -54,8 +65,8 @@ class EvidenceItem(BaseModel):
     transcript_key: str | None = None
     preview_key: str | None = None
     is_key_evidence: bool
-    tags: list[str]
-    metadata: dict[str, Any]
+    tags: CoercedList = []
+    metadata: CoercedDict = {}
     class Config:
         from_attributes = True
 

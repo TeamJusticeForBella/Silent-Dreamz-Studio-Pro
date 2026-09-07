@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     TIKA_URL: str = "http://localhost:9998"
     GOTENBERG_URL: str = "http://localhost:3000"
 
+    JWT_SECRET: str = "CHANGE-ME-in-production-use-a-real-secret"
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRY_MINUTES: int = 1440
+
     class Config:
         env_file = ".env"
 

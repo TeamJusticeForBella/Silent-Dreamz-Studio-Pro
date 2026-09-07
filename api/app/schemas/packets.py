@@ -1,8 +1,21 @@
+import json
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
+
+
+def _coerce_json(v: Any) -> Any:
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return v
+
+
+CoercedDict = Annotated[dict[str, Any], BeforeValidator(_coerce_json)]
 
 
 class PacketType(str, Enum):
@@ -37,7 +50,7 @@ class Packet(BaseModel):
     title: str
     target_name: str | None = None
     description_md: str | None = None
-    settings: dict[str, Any]
+    settings: CoercedDict = {}
     created_at: datetime
     updated_at: datetime
     class Config:

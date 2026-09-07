@@ -1,6 +1,20 @@
+import json
 from datetime import datetime
+from typing import Annotated, Any
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, BeforeValidator
+
+
+def _coerce_json(v: Any) -> Any:
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return v
+
+
+CoercedList = Annotated[list[str], BeforeValidator(_coerce_json)]
 
 
 class IncidentCreateRequest(BaseModel):
@@ -28,7 +42,7 @@ class Incident(BaseModel):
     status: str
     summary_md: str | None = None
     narrative_md: str | None = None
-    allegation_tags: list[str]
+    allegation_tags: CoercedList = []
     incident_time_start: datetime | None = None
     incident_time_end: datetime | None = None
     created_at: datetime

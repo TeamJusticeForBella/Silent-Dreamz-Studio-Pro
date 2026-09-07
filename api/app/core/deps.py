@@ -1,18 +1,19 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .auth import AuthenticatedUser, get_current_user
 from .database import get_db
 
-
-async def get_workspace_id(x_workspace_id: Annotated[str, Header()]) -> UUID:
-    try:
-        return UUID(x_workspace_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid X-Workspace-Id header")
-
-
 DBSession = Annotated[AsyncSession, Depends(get_db)]
+CurrentUser = Annotated[AuthenticatedUser, Depends(get_current_user)]
+
+
+def get_workspace_id(user: AuthenticatedUser = Depends(get_current_user)) -> UUID:
+    """Server-resolved workspace -- never trust a client header."""
+    return user.workspace_id
+
+
 WorkspaceId = Annotated[UUID, Depends(get_workspace_id)]
