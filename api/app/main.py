@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from .core.clients import close_nats, connect_nats
+from .core.config import guard_production_secrets
 from .routers import auth, citations, drafts, evidence, exports, health, incidents, packets, search
 from .services.nats_jobs import ensure_stream
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    guard_production_secrets()
     await connect_nats()
     await ensure_stream()
     yield

@@ -1,4 +1,8 @@
+import sys
+
 from pydantic_settings import BaseSettings
+
+_INSECURE_DEFAULT_SECRET = "CHANGE-ME-in-production-use-a-real-secret"
 
 
 class Settings(BaseSettings):
@@ -19,7 +23,7 @@ class Settings(BaseSettings):
     TIKA_URL: str = "http://localhost:9998"
     GOTENBERG_URL: str = "http://localhost:3000"
 
-    JWT_SECRET: str = "CHANGE-ME-in-production-use-a-real-secret"
+    JWT_SECRET: str = _INSECURE_DEFAULT_SECRET
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRY_MINUTES: int = 1440
 
@@ -28,3 +32,10 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def guard_production_secrets() -> None:
+    if settings.APP_ENV in ("production", "staging"):
+        if settings.JWT_SECRET == _INSECURE_DEFAULT_SECRET:
+            print("FATAL: JWT_SECRET is the default development value. Set a real secret via JWT_SECRET env var.", file=sys.stderr)
+            sys.exit(1)

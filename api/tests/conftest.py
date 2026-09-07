@@ -12,7 +12,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from api.app.core.auth import create_access_token
+from api.app.core.auth import create_access_token, hash_password
 from api.app.core.database import get_db
 
 WS_A_ID = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
@@ -20,6 +20,13 @@ WS_B_ID = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 USER_A_ID = uuid4()
 USER_B_ID = uuid4()
 USER_INACTIVE_ID = uuid4()
+
+ALICE_PASSWORD = "alice-secure-P@ss1"
+BOB_PASSWORD = "bob-secure-P@ss2"
+INACTIVE_PASSWORD = "inactive-pass"
+ALICE_HASH = hash_password(ALICE_PASSWORD)
+BOB_HASH = hash_password(BOB_PASSWORD)
+INACTIVE_HASH = hash_password(INACTIVE_PASSWORD)
 
 engine = create_async_engine("sqlite+aiosqlite://", echo=False)
 TestSession = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -65,7 +72,20 @@ CREATE TABLE IF NOT EXISTS app_user (
     display_name  TEXT,
     role          TEXT NOT NULL DEFAULT 'member',
     is_active     BOOLEAN NOT NULL DEFAULT 1,
+    password_hash TEXT,
     UNIQUE (workspace_id, email)
+);
+
+CREATE TABLE IF NOT EXISTS workspace_invitation (
+    id            TEXT PRIMARY KEY,
+    workspace_id  TEXT NOT NULL REFERENCES workspace(id),
+    email         TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'member',
+    invite_code   TEXT NOT NULL UNIQUE,
+    created_by    TEXT REFERENCES app_user(id),
+    used_at       TEXT,
+    expires_at    TEXT,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS evidence_item (
@@ -227,7 +247,7 @@ async def _init_db():
     async with engine.begin() as conn:
         for tbl in ["draft_citation", "citation_anchor", "packet_exhibit", "incident_evidence",
                      "custody_event", "export_artifact", "draft", "packet", "evidence_item",
-                     "incident", "app_user", "workspace"]:
+                     "incident", "workspace_invitation", "app_user", "workspace"]:
             await conn.execute(text(f"DROP TABLE IF EXISTS {tbl}"))
         for stmt in DDL.split(";"):
             stmt = stmt.strip()
@@ -240,17 +260,17 @@ async def _init_db():
             "INSERT OR IGNORE INTO workspace (id, name, slug) VALUES (:id, :name, :slug)"
         ), {"id": str(WS_B_ID), "name": "Workspace B", "slug": "ws-b"})
         await conn.execute(text(
-            "INSERT OR IGNORE INTO app_user (id, workspace_id, email, display_name, role, is_active) "
-            "VALUES (:id, :wid, :email, :name, :role, 1)"
-        ), {"id": str(USER_A_ID), "wid": str(WS_A_ID), "email": "alice@example.com", "name": "Alice", "role": "admin"})
+            "INSERT OR IGNORE INTO app_user (id, workspace_id, email, display_name, role, is_active, password_hash) "
+            "VALUES (:id, :wid, :email, :name, :role, 1, :pw_hash)"
+        ), {"id": str(USER_A_ID), "wid": str(WS_A_ID), "email": "alice@example.com", "name": "Alice", "role": "admin", "pw_hash": ALICE_HASH})
         await conn.execute(text(
-            "INSERT OR IGNORE INTO app_user (id, workspace_id, email, display_name, role, is_active) "
-            "VALUES (:id, :wid, :email, :name, :role, 1)"
-        ), {"id": str(USER_B_ID), "wid": str(WS_B_ID), "email": "bob@example.com", "name": "Bob", "role": "member"})
+            "INSERT OR IGNORE INTO app_user (id, workspace_id, email, display_name, role, is_active, password_hash) "
+            "VALUES (:id, :wid, :email, :name, :role, 1, :pw_hash)"
+        ), {"id": str(USER_B_ID), "wid": str(WS_B_ID), "email": "bob@example.com", "name": "Bob", "role": "member", "pw_hash": BOB_HASH})
         await conn.execute(text(
-            "INSERT OR IGNORE INTO app_user (id, workspace_id, email, display_name, role, is_active) "
-            "VALUES (:id, :wid, :email, :name, :role, 0)"
-        ), {"id": str(USER_INACTIVE_ID), "wid": str(WS_A_ID), "email": "inactive@example.com", "name": "Gone", "role": "member"})
+            "INSERT OR IGNORE INTO app_user (id, workspace_id, email, display_name, role, is_active, password_hash) "
+            "VALUES (:id, :wid, :email, :name, :role, 0, :pw_hash)"
+        ), {"id": str(USER_INACTIVE_ID), "wid": str(WS_A_ID), "email": "inactive@example.com", "name": "Gone", "role": "member", "pw_hash": INACTIVE_HASH})
     _db_ready = True
 
 
@@ -275,7 +295,6 @@ def _make_app():
     nj.publish_job = _noop_publish
     nj.ensure_stream = _noop_stream
 
-    # Disable the lifespan (NATS connect) for tests
     app.router.lifespan_context = None
     return app
 

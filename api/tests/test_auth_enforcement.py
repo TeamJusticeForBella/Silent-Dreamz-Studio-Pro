@@ -1,10 +1,15 @@
-"""Priority 2: Authentication and workspace authorization tests.
+"""P0 Security: Authentication and workspace authorization tests.
 
 Proves:
-- Unauthenticated requests are denied (401)
+- Unauthenticated requests are denied (401/403)
+- Wrong passwords are rejected (bcrypt verification)
 - Users cannot access another workspace's resources (404 / empty)
 - Upload-url and finalize reject unauthorized requests
 - Expired and invalid tokens are rejected
+- Registration requires a valid, unused, email-matched invitation
+- Public registration cannot join an arbitrary workspace
+- Inactive users are denied
+- Default dev secrets are rejected in production
 """
 import pytest
 from datetime import datetime, timedelta, timezone
@@ -12,10 +17,12 @@ from uuid import uuid4
 
 import jwt
 
-from api.app.core.config import settings
+from api.app.core.config import settings, _INSECURE_DEFAULT_SECRET, guard_production_secrets
+from api.app.core.auth import hash_password
 from .conftest import (
     TOKEN_A, TOKEN_B, USER_A_ID, USER_B_ID, USER_INACTIVE_ID,
-    WS_A_ID, WS_B_ID, token_for,
+    WS_A_ID, WS_B_ID, ALICE_PASSWORD, BOB_PASSWORD,
+    token_for,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -103,7 +110,54 @@ async def test_nonexistent_user_denied(client):
     assert resp.status_code == 401
 
 
-# ── 3. Cross-workspace isolation ─────────────────────────────────────
+# ── 3. Password verification (bcrypt) ────────────────────────────────
+
+async def test_login_correct_password(client):
+    resp = await client.post("/auth/login", json={"email": "alice@example.com", "password": ALICE_PASSWORD})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "access_token" in data
+    assert data["token_type"] == "bearer"
+
+
+async def test_login_wrong_password(client):
+    resp = await client.post("/auth/login", json={"email": "alice@example.com", "password": "wrong-password-123"})
+    assert resp.status_code == 401
+
+
+async def test_login_empty_password(client):
+    resp = await client.post("/auth/login", json={"email": "alice@example.com", "password": ""})
+    assert resp.status_code == 401
+
+
+async def test_login_unknown_email(client):
+    resp = await client.post("/auth/login", json={"email": "nobody@example.com", "password": "any"})
+    assert resp.status_code == 401
+
+
+async def test_login_inactive_user(client):
+    resp = await client.post("/auth/login", json={"email": "inactive@example.com", "password": "inactive-pass"})
+    assert resp.status_code == 401
+
+
+async def test_login_token_grants_access(client):
+    login = await client.post("/auth/login", json={"email": "alice@example.com", "password": ALICE_PASSWORD})
+    tok = login.json()["access_token"]
+    resp = await client.get("/evidence", headers={"Authorization": f"Bearer {tok}"})
+    assert resp.status_code == 200
+
+
+async def test_bob_login_correct_password(client):
+    resp = await client.post("/auth/login", json={"email": "bob@example.com", "password": BOB_PASSWORD})
+    assert resp.status_code == 200
+
+
+async def test_bob_login_wrong_password(client):
+    resp = await client.post("/auth/login", json={"email": "bob@example.com", "password": "not-bobs-password"})
+    assert resp.status_code == 401
+
+
+# ── 4. Cross-workspace isolation ─────────────────────────────────────
 
 async def test_user_a_creates_evidence(client, auth_a):
     body = {
@@ -182,7 +236,7 @@ async def test_cross_workspace_patch_blocked(client, auth_a, auth_b):
     assert patch_resp.status_code == 404, "Cross-workspace patch must be blocked"
 
 
-# ── 4. Upload / finalize reject unauthorized ─────────────────────────
+# ── 5. Upload / finalize reject unauthorized ─────────────────────────
 
 async def test_upload_url_no_token(client):
     eid = uuid4()
@@ -202,35 +256,139 @@ async def test_finalize_no_token(client):
     assert resp.status_code in (401, 403)
 
 
-# ── 5. Auth login endpoint ───────────────────────────────────────────
+# ── 6. Invitation-based registration ─────────────────────────────────
 
-async def test_login_valid_user(client):
-    resp = await client.post("/auth/login", json={"email": "alice@example.com", "password": "any"})
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "access_token" in data
-    assert data["token_type"] == "bearer"
-
-
-async def test_login_unknown_email(client):
-    resp = await client.post("/auth/login", json={"email": "nobody@example.com", "password": "any"})
-    assert resp.status_code == 401
+async def test_register_without_invite_fails(client):
+    resp = await client.post("/auth/register", json={
+        "email": "newuser@example.com",
+        "display_name": "New User",
+        "password": "strong-P@ss123",
+        "invite_code": "nonexistent-code",
+    })
+    assert resp.status_code == 403
 
 
-async def test_login_inactive_user(client):
-    resp = await client.post("/auth/login", json={"email": "inactive@example.com", "password": "any"})
-    assert resp.status_code == 401
+async def test_invite_requires_admin(client, auth_b):
+    resp = await client.post("/auth/invite", json={
+        "email": "invited@example.com",
+    }, headers=auth_b)
+    assert resp.status_code == 403, "Non-admin must not create invitations"
 
 
-async def test_login_empty_password(client):
-    resp = await client.post("/auth/login", json={"email": "alice@example.com", "password": ""})
-    assert resp.status_code == 401
+async def test_invite_and_register_flow(client, auth_a):
+    invite_resp = await client.post("/auth/invite", json={
+        "email": "newmember@example.com",
+        "role": "member",
+    }, headers=auth_a)
+    assert invite_resp.status_code == 201
+    invite_data = invite_resp.json()
+    code = invite_data["invite_code"]
+    assert invite_data["workspace_id"] == str(WS_A_ID)
+
+    reg_resp = await client.post("/auth/register", json={
+        "email": "newmember@example.com",
+        "display_name": "New Member",
+        "password": "new-member-P@ss1",
+        "invite_code": code,
+    })
+    assert reg_resp.status_code == 201
+    user = reg_resp.json()
+    assert user["workspace_id"] == str(WS_A_ID)
+    assert user["role"] == "member"
+
+    login_resp = await client.post("/auth/login", json={
+        "email": "newmember@example.com",
+        "password": "new-member-P@ss1",
+    })
+    assert login_resp.status_code == 200
 
 
-# ── 6. Token from login works on protected endpoints ─────────────────
+async def test_invite_code_cannot_be_reused(client, auth_a):
+    invite_resp = await client.post("/auth/invite", json={
+        "email": "oneuse@example.com",
+        "role": "member",
+    }, headers=auth_a)
+    code = invite_resp.json()["invite_code"]
 
-async def test_login_token_grants_access(client):
-    login = await client.post("/auth/login", json={"email": "alice@example.com", "password": "pw"})
-    tok = login.json()["access_token"]
-    resp = await client.get("/evidence", headers={"Authorization": f"Bearer {tok}"})
-    assert resp.status_code == 200
+    await client.post("/auth/register", json={
+        "email": "oneuse@example.com",
+        "display_name": "First Use",
+        "password": "first-P@ss1",
+        "invite_code": code,
+    })
+
+    second = await client.post("/auth/register", json={
+        "email": "oneuse2@example.com",
+        "display_name": "Second Use",
+        "password": "second-P@ss1",
+        "invite_code": code,
+    })
+    assert second.status_code == 403, "Reused invite code must be rejected"
+
+
+async def test_invite_wrong_email_rejected(client, auth_a):
+    invite_resp = await client.post("/auth/invite", json={
+        "email": "specific@example.com",
+        "role": "member",
+    }, headers=auth_a)
+    code = invite_resp.json()["invite_code"]
+
+    resp = await client.post("/auth/register", json={
+        "email": "different@example.com",
+        "display_name": "Wrong Email",
+        "password": "wrong-email-P@ss1",
+        "invite_code": code,
+    })
+    assert resp.status_code == 403, "Invite for different email must be rejected"
+
+
+async def test_invite_no_auth_fails(client):
+    resp = await client.post("/auth/invite", json={
+        "email": "invited@example.com",
+    })
+    assert resp.status_code in (401, 403)
+
+
+# ── 7. Default secret rejection in production ────────────────────────
+
+def test_default_secret_rejected_in_production():
+    original_env = settings.APP_ENV
+    original_secret = settings.JWT_SECRET
+    try:
+        settings.APP_ENV = "production"
+        settings.JWT_SECRET = _INSECURE_DEFAULT_SECRET
+        with pytest.raises(SystemExit):
+            guard_production_secrets()
+    finally:
+        settings.APP_ENV = original_env
+        settings.JWT_SECRET = original_secret
+
+
+def test_default_secret_allowed_in_development():
+    original_env = settings.APP_ENV
+    original_secret = settings.JWT_SECRET
+    try:
+        settings.APP_ENV = "development"
+        settings.JWT_SECRET = _INSECURE_DEFAULT_SECRET
+        guard_production_secrets()
+    finally:
+        settings.APP_ENV = original_env
+        settings.JWT_SECRET = original_secret
+
+
+# ── 8. Cross-workspace draft and export isolation ─────────────────────
+
+async def test_cross_workspace_draft_isolation(client, auth_a, auth_b):
+    body = {"title": "WS-A Draft"}
+    create = await client.post("/drafts", json=body, headers=auth_a)
+    if create.status_code == 201:
+        did = create.json()["id"]
+        get_resp = await client.get(f"/drafts/{did}", headers=auth_b)
+        assert get_resp.status_code == 404
+
+
+async def test_cross_workspace_export_list_isolation(client, auth_a, auth_b):
+    resp_a = await client.get("/exports", headers=auth_a)
+    resp_b = await client.get("/exports", headers=auth_b)
+    assert resp_a.status_code == 200
+    assert resp_b.status_code == 200

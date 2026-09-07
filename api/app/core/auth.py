@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+import bcrypt
 import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -27,6 +28,14 @@ class AuthenticatedUser(BaseModel):
     email: str
     role: str
     display_name: str
+
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 def create_access_token(data: dict) -> str:
@@ -82,9 +91,3 @@ async def get_current_user(
         role=row["role"],
         display_name=row["display_name"],
     )
-
-
-def get_workspace_id_authorized(
-    user: AuthenticatedUser = Depends(get_current_user),
-) -> UUID:
-    return user.workspace_id
