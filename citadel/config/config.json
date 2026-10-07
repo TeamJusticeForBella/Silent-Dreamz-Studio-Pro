@@ -1,0 +1,5 @@
+{
+  "_comment": "Citadel Intake V1 config. 'root' is where ~/Citadel's working tree lives; override per-run with --root or $CITADEL_ROOT (tests always do this so they never touch a real evidence tree).",
+  "root": "~/Citadel",
+  "min_free_gib": 5
+}

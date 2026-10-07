@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""
+citadel-verify — rehash ORIGINAL file(s) and compare against the hash
+recorded at intake time. Never touches working copies for integrity
+purposes, and never repairs or replaces a mismatched original — a
+mismatch becomes an INTEGRITY_ALERT, recorded in the DB, sidecar, and
+audit log, and is surfaced to the operator for manual investigation.
+
+    citadel-verify --evidence-id EVD-20261007-000001 [--root ...]
+    citadel-verify --all [--root ...]
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import citadel_core as cc  # noqa: E402
+
+ACTOR = "citadel-verify"
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(description="Verify Citadel evidence integrity.")
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument("--evidence-id", default=None)
+    g.add_argument("--all", action="store_true")
+    p.add_argument("--root", default=None)
+    return p.parse_args(argv)
+
+
+def verify_one(conn, config, evidence_id):
+    row = conn.execute("SELECT * FROM evidence WHERE evidence_id = ?", (evidence_id,)).fetchone()
+    if row is None:
+        return {"evidence_id": evidence_id, "error": "not found"}
+
+    original_path = row["original_path"]
+    expected = row["sha256"]
+    now = cc.utcnow_iso()
+
+    if not os.path.exists(original_path):
+        cc.audit(conn, evidence_id, "INTEGRITY_ALERT", ACTOR, {"reason": "original missing", "path": original_path})
+        conn.execute("UPDATE evidence SET integrity_status = 'INTEGRITY_ALERT' WHERE evidence_id = ?", (evidence_id,))
+        return {"evidence_id": evidence_id, "integrity_status": "INTEGRITY_ALERT", "reason": "original file missing"}
+
+    actual = cc.sha256_file(original_path)
+    conn.execute(
+        "INSERT INTO hashes (evidence_id, sha256, algo, stage, computed_at) VALUES (?, ?, 'sha256', 'verify', ?)",
+        (evidence_id, actual, now),
+    )
+
+    if actual == expected:
+        cc.audit(conn, evidence_id, "VERIFY_OK", ACTOR, {"sha256": actual})
+        conn.execute("UPDATE evidence SET integrity_status = 'OK' WHERE evidence_id = ?", (evidence_id,))
+        status = "OK"
+    else:
+        cc.audit(
+            conn, evidence_id, "INTEGRITY_ALERT", ACTOR,
+            {"reason": "hash mismatch", "expected": expected, "actual": actual},
+        )
+        conn.execute("UPDATE evidence SET integrity_status = 'INTEGRITY_ALERT' WHERE evidence_id = ?", (evidence_id,))
+        status = "INTEGRITY_ALERT"
+
+    try:
+        sidecar = cc.read_sidecar(config, evidence_id)
+        sidecar["integrity_status"] = status
+        cc.write_sidecar(config, evidence_id, sidecar)
+    except FileNotFoundError:
+        pass
+
+    return {"evidence_id": evidence_id, "integrity_status": status, "sha256": actual}
+
+
+def main(argv=None):
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    config = cc.CitadelConfig(root=args.root)
+    cc.init_db(config)
+
+    results = []
+    with cc.open_db(config) as conn:
+        if args.all:
+            ids = [r["evidence_id"] for r in conn.execute("SELECT evidence_id FROM evidence ORDER BY evidence_id")]
+        else:
+            ids = [args.evidence_id]
+        for eid in ids:
+            results.append(verify_one(conn, config, eid))
+
+    print(json.dumps(results, indent=2))
+    any_alert = any(r.get("integrity_status") == "INTEGRITY_ALERT" for r in results)
+    return 1 if any_alert else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
