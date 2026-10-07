@@ -2,7 +2,15 @@
 """
 citadel-status — read-only dashboard: disk safety gate, adapter
 connectivity, evidence counts, port 22 state on *this* host, recent
-audit log entries. Never modifies anything.
+audit log entries.
+
+V1.1: this is now LITERALLY read-only. It never calls os.makedirs(),
+never runs CREATE TABLE, never INSERTs anything. If 05_INDEX/citadel.db
+doesn't exist, it reports db_status="NOT_INITIALIZED" instead of
+creating one. The DB (when present) is opened with SQLite's `mode=ro`
+URI flag (citadel_core.open_db_readonly), which refuses writes at the
+driver level — so even a bug in this script's own SQL couldn't mutate
+the database.
 
     citadel-status [--root ...] [--json]
 """
@@ -16,7 +24,7 @@ import citadel_core as cc  # noqa: E402
 
 
 def parse_args(argv):
-    p = argparse.ArgumentParser(description="Citadel status / dashboard.")
+    p = argparse.ArgumentParser(description="Citadel status / dashboard (read-only).")
     p.add_argument("--root", default=None)
     p.add_argument("--json", action="store_true", help="machine-readable output")
     return p.parse_args(argv)
@@ -37,23 +45,32 @@ def gather(config: cc.CitadelConfig):
         },
         "port_22_listening_on_this_host": port22,
         "adapters": adapters,
-        "evidence": {"total": 0, "by_type": {}, "by_integrity_status": {}},
+        "db_status": "NOT_INITIALIZED",
+        "evidence": {"total": 0, "by_type": {}, "by_integrity_status": {}, "by_intake_state": {}},
         "recent_audit": [],
+        "audit_chain": {"status": "NO_LOG", "entries": 0},
     }
 
-    if os.path.exists(config.db_path):
-        cc.init_db(config)
-        with cc.open_db(config) as conn:
+    try:
+        with cc.open_db_readonly(config) as conn:
+            report["db_status"] = "OK"
             total = conn.execute("SELECT COUNT(*) c FROM evidence").fetchone()["c"]
             report["evidence"]["total"] = total
             for row in conn.execute("SELECT evidence_type, COUNT(*) c FROM evidence GROUP BY evidence_type"):
                 report["evidence"]["by_type"][row["evidence_type"]] = row["c"]
             for row in conn.execute("SELECT integrity_status, COUNT(*) c FROM evidence GROUP BY integrity_status"):
                 report["evidence"]["by_integrity_status"][row["integrity_status"]] = row["c"]
+            for row in conn.execute("SELECT intake_state, COUNT(*) c FROM evidence GROUP BY intake_state"):
+                report["evidence"]["by_intake_state"][row["intake_state"]] = row["c"]
             for row in conn.execute(
                 "SELECT evidence_id, action, actor, timestamp FROM audit_log ORDER BY id DESC LIMIT 10"
             ):
                 report["recent_audit"].append(dict(row))
+    except FileNotFoundError:
+        pass  # db_status stays NOT_INITIALIZED; no mutation attempted, nothing created
+
+    # Read-only: verify_chain() only opens the log file for reading.
+    report["audit_chain"] = cc.verify_chain(config.intake_log_path)
 
     return report
 
@@ -68,15 +85,22 @@ def print_human(report):
     print("Adapters:")
     for name, info in report["adapters"].items():
         print(f"  {name:22s} {info['status']:14s} {info['detail']}")
-    print(f"Evidence total: {report['evidence']['total']}")
-    if report["evidence"]["by_type"]:
-        print(f"  by type:      {report['evidence']['by_type']}")
-    if report["evidence"]["by_integrity_status"]:
-        print(f"  by integrity: {report['evidence']['by_integrity_status']}")
-    if report["recent_audit"]:
-        print("Recent audit log:")
-        for e in report["recent_audit"]:
-            print(f"  [{e['timestamp']}] {e['action']:24s} {e['evidence_id']}  ({e['actor']})")
+    print(f"DB status: {report['db_status']}")
+    if report["db_status"] == "OK":
+        print(f"Evidence total: {report['evidence']['total']}")
+        if report["evidence"]["by_type"]:
+            print(f"  by type:         {report['evidence']['by_type']}")
+        if report["evidence"]["by_integrity_status"]:
+            print(f"  by integrity:    {report['evidence']['by_integrity_status']}")
+        if report["evidence"]["by_intake_state"]:
+            print(f"  by intake_state: {report['evidence']['by_intake_state']}")
+        if report["recent_audit"]:
+            print("Recent audit log:")
+            for e in report["recent_audit"]:
+                print(f"  [{e['timestamp']}] {e['action']:24s} {e['evidence_id']}  ({e['actor']})")
+    ac = report["audit_chain"]
+    print(f"Audit chain (06_LOGS/intake.log): {ac['status']}"
+          + (f" ({ac['entries']} entries)" if ac["status"] == "OK" else ""))
 
 
 def main(argv=None):

@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""
+citadel-audit-verify — walk the hash-chained 06_LOGS/intake.log and prove
+(or disprove) that it hasn't been edited, reordered, or truncated-and-
+rewritten since it was written.
+
+    citadel-audit-verify [--root ...] [--json]
+
+Exit codes: 0 = chain intact (or no log yet), 1 = chain broken.
+
+~~~ WHAT THIS DOES AND DOES NOT PROVE — READ BEFORE TRUSTING THIS ~~~
+
+Each line in intake.log carries `previous_entry_hash` (the prior line's
+`entry_hash`, or 64 zeros for the first line) and `entry_hash` = SHA-256
+of that line's own canonical JSON. This tool recomputes every hash and
+re-checks every link, and if any line doesn't match, it reports the
+FIRST line where the chain breaks.
+
+This is tamper-EVIDENT, not tamper-proof, and specifically:
+
+  - It has NO external anchor. There is no timestamping authority,
+    no separate ledger, no write-once/WORM media, no blockchain, nothing
+    outside this one file. The chain only proves internal self-
+    consistency — that today's file is one unbroken sequence from
+    GENESIS to its last line.
+  - Anyone with filesystem write access to intake.log — including the
+    same user account that runs citadel-intake, and including root —
+    can simply delete the file and regenerate a brand-new, perfectly
+    self-consistent chain from scratch, or rewrite the tail of the file
+    with fabricated entries whose hashes all validate against each
+    other. This tool cannot distinguish that from a genuine untouched
+    log, because it has nothing to compare against except the file
+    itself.
+  - It protects against accidental corruption (a bad write, a partial
+    disk fault, an editor mangling a line) and against naive tampering
+    (someone hand-editing one field in the middle of the file without
+    recomputing every hash after it). It does NOT protect against a
+    deliberate, competent attacker with write access to this file who
+    is willing to regenerate the whole thing.
+  - If you need real tamper-proofing — defensible in the sense a forensic
+    chain-of-custody argument needs — that requires an external,
+    independently-controlled anchor: signing each entry_hash with a key
+    the intake process doesn't have write access to, periodically
+    publishing the latest entry_hash somewhere append-only and outside
+    this machine's control, or similar. None of that exists in V1.1.
+
+Use this tool to catch mistakes and sloppy tampering, and to get a
+specific, citable "first broken record" when something looks wrong. Do
+not present a clean run of this tool as proof the log is forensically
+unimpeachable — it isn't, for the reasons above.
+"""
+import argparse
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
+import citadel_core as cc  # noqa: E402
+
+
+def parse_args(argv):
+    p = argparse.ArgumentParser(description="Verify the Citadel intake audit chain (read-only).")
+    p.add_argument("--root", default=None)
+    p.add_argument("--json", action="store_true")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv if argv is not None else sys.argv[1:])
+    config = cc.CitadelConfig(root=args.root)
+    result = cc.verify_chain(config.intake_log_path)
+    result["log_path"] = config.intake_log_path
+
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        if result["status"] == "NO_LOG":
+            print(f"No intake log at {config.intake_log_path} — nothing to verify.")
+        elif result["status"] == "OK":
+            print(f"Chain OK: {result['entries']} entries, all hashes and links verified.")
+            print("(Tamper-evident only, not tamper-proof — see this script's docstring.)")
+        else:
+            print(f"CHAIN BROKEN at line {result['broken_at_line']}: {result['reason']}")
+            if result.get("evidence_id"):
+                print(f"  evidence_id: {result['evidence_id']}")
+
+    return 0 if result["status"] in ("OK", "NO_LOG") else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

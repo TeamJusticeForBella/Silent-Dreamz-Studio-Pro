@@ -3,8 +3,15 @@
 citadel-verify — rehash ORIGINAL file(s) and compare against the hash
 recorded at intake time. Never touches working copies for integrity
 purposes, and never repairs or replaces a mismatched original — a
-mismatch becomes an INTEGRITY_ALERT, recorded in the DB, sidecar, and
-audit log, and is surfaced to the operator for manual investigation.
+mismatch becomes an INTEGRITY_ALERT, recorded in the DB and audit log,
+and is surfaced to the operator for manual investigation.
+
+V1.1: the intake sidecar (<id>.intake.json) is frozen historical
+provenance and is NEVER rewritten here. Each run instead writes a new,
+separate record to 03_METADATA/verification/<id>.VERIFY-<timestamp>.json.
+The DB's `evidence.integrity_status` column is still updated — that's
+the live, current-knowledge field, which is a different thing from the
+sidecar's frozen snapshot of what was true at intake.
 
     citadel-verify --evidence-id EVD-20261007-000001 [--root ...]
     citadel-verify --all [--root ...]
@@ -41,6 +48,11 @@ def verify_one(conn, config, evidence_id):
     if not os.path.exists(original_path):
         cc.audit(conn, evidence_id, "INTEGRITY_ALERT", ACTOR, {"reason": "original missing", "path": original_path})
         conn.execute("UPDATE evidence SET integrity_status = 'INTEGRITY_ALERT' WHERE evidence_id = ?", (evidence_id,))
+        cc.write_verification_record(config, evidence_id, {
+            "evidence_id": evidence_id, "verified_at": now, "stage": "verify",
+            "integrity_status": "INTEGRITY_ALERT", "reason": "original file missing",
+            "expected_sha256": expected,
+        })
         return {"evidence_id": evidence_id, "integrity_status": "INTEGRITY_ALERT", "reason": "original file missing"}
 
     actual = cc.sha256_file(original_path)
@@ -50,23 +62,21 @@ def verify_one(conn, config, evidence_id):
     )
 
     if actual == expected:
-        cc.audit(conn, evidence_id, "VERIFY_OK", ACTOR, {"sha256": actual})
-        conn.execute("UPDATE evidence SET integrity_status = 'OK' WHERE evidence_id = ?", (evidence_id,))
         status = "OK"
+        cc.audit(conn, evidence_id, "VERIFY_OK", ACTOR, {"sha256": actual})
     else:
+        status = "INTEGRITY_ALERT"
         cc.audit(
             conn, evidence_id, "INTEGRITY_ALERT", ACTOR,
             {"reason": "hash mismatch", "expected": expected, "actual": actual},
         )
-        conn.execute("UPDATE evidence SET integrity_status = 'INTEGRITY_ALERT' WHERE evidence_id = ?", (evidence_id,))
-        status = "INTEGRITY_ALERT"
 
-    try:
-        sidecar = cc.read_sidecar(config, evidence_id)
-        sidecar["integrity_status"] = status
-        cc.write_sidecar(config, evidence_id, sidecar)
-    except FileNotFoundError:
-        pass
+    conn.execute("UPDATE evidence SET integrity_status = ? WHERE evidence_id = ?", (status, evidence_id))
+
+    cc.write_verification_record(config, evidence_id, {
+        "evidence_id": evidence_id, "verified_at": now, "stage": "verify",
+        "sha256": actual, "expected_sha256": expected, "integrity_status": status,
+    })
 
     return {"evidence_id": evidence_id, "integrity_status": status, "sha256": actual}
 

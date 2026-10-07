@@ -8,16 +8,33 @@ citadel-intake — ingest one file into the Citadel evidence pipeline.
         --event-date 2026-10-01 \\
         --event-date-precision day \\
         --notes "screenshot of text thread" \\
-        [--root /path/to/citadel/root]
+        [--root /path/to/citadel/root] [--min-free-gib 5]
 
 Prints a JSON receipt to stdout (evidence_id, sha256, integrity_status,
 queue_status) — this is exactly what the iPhone Shortcut is meant to
 receive back and display.
 
+Acquisition pipeline (V1.1): each evidence item moves through an explicit
+intake_state — RESERVED -> COPYING -> HASHING -> ORIGINAL_VERIFIED ->
+WORKING_COPY_CREATED -> INDEXED -> QUEUED -> COMPLETE, or FAILED from any
+of those. The evidence_id and its row are reserved atomically (one
+BEGIN IMMEDIATE transaction — see citadel_core.reserve_evidence()) before
+any file is touched, so two concurrent intakes can never mint the same
+ID. The original is staged at a `.tmp-<id>` path and only promoted to its
+real, permanent name via an atomic os.replace() after its copy's hash is
+verified — so a half-finished copy can never be mistaken for a finalized
+original, and a finalized original is never deleted by any later failure.
+
+Source-mutation detection: the source file's size+mtime are captured
+before copying and re-checked immediately after; if either changed, the
+acquisition is refused as SOURCE_CHANGED_DURING_INTAKE rather than
+certifying bytes that may not be what the operator thinks they sent.
+
 Safety:
   - Refuses to run if free disk space on the target root's filesystem is
-    below the configured minimum (default 5 GiB). Nothing is copied,
-    nothing is created, in that case.
+    below the configured minimum (default 5 GiB, override with
+    --min-free-gib). Nothing is created in that case — no directories,
+    no DB, no files.
   - Never overwrites an existing original. A second intake of the *same*
     bytes creates a new evidence_id and is flagged as a duplicate of the
     earlier one; the earlier evidence is untouched (JASON GATE: existing
@@ -25,10 +42,9 @@ Safety:
 """
 import argparse
 import json
-import mimetypes
 import os
+import shutil
 import sys
-from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib"))
 import citadel_core as cc  # noqa: E402
@@ -49,125 +65,167 @@ def parse_args(argv):
     )
     p.add_argument("--notes", default="")
     p.add_argument("--root", default=None, help="Override Citadel root (default: ~/Citadel)")
+    p.add_argument(
+        "--min-free-gib", type=float, default=None,
+        help="Override the disk safety gate threshold (default: config.json's min_free_gib, 5 GiB)",
+    )
     return p.parse_args(argv)
+
+
+def fail(config, evidence_id, tmp_path, reason, message, extra=None):
+    """Common failure path: mark FAILED (if a row exists), clean up only
+    the staging tmp file (never a finalized original), print the error."""
+    if evidence_id:
+        try:
+            cc.advance_state(config, evidence_id, "FAILED", ACTOR, detail={"reason": reason, **(extra or {})})
+        except Exception:
+            pass  # if even this fails, the row is just stuck at its last good state
+    if tmp_path and os.path.exists(tmp_path):
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+    print(json.dumps({"error": reason, "message": message, "evidence_id": evidence_id, **(extra or {})}))
 
 
 def main(argv=None):
     args = parse_args(argv if argv is not None else sys.argv[1:])
-    config = cc.CitadelConfig(root=args.root)
+    config = cc.CitadelConfig(root=args.root, min_free_gib=args.min_free_gib)
 
     if not os.path.isfile(args.source_file):
-        print(json.dumps({"error": f"no such file: {args.source_file}"}))
+        print(json.dumps({"error": "NO_SUCH_FILE", "message": f"no such file: {args.source_file}"}))
         return 2
 
+    # HARD SAFETY GATE — checked before anything else is touched. If this
+    # fails, no directory, DB, original, working copy, sidecar, or log is
+    # ever created.
     ok, free_gib, min_gib = cc.check_disk_safety_gate(config)
     if not ok:
-        print(
-            json.dumps(
-                {
-                    "error": "DISK_SAFETY_GATE",
-                    "message": f"only {free_gib:.2f} GiB free on {config.root}'s filesystem; "
-                    f"minimum required is {min_gib:.2f} GiB. Refusing to copy or process evidence.",
-                    "free_gib": round(free_gib, 2),
-                    "min_gib": min_gib,
-                }
-            )
-        )
+        print(json.dumps({
+            "error": "DISK_SAFETY_GATE",
+            "message": f"only {free_gib:.2f} GiB free on {config.root}'s filesystem; "
+                       f"minimum required is {min_gib:.2f} GiB. Refusing to copy or process evidence.",
+            "free_gib": round(free_gib, 2),
+            "min_gib": min_gib,
+        }))
         return 3
 
     cc.init_db(config)
     for d in cc.CitadelConfig.STORAGE_SUBDIRS:
         os.makedirs(config.path(d), exist_ok=True)
 
-    original_filename = os.path.basename(args.source_file)
-    byte_size = os.path.getsize(args.source_file)
+    original_filename_raw = os.path.basename(args.source_file)[:1024]
+    fs_safe_filename = cc.sanitize_filename(original_filename_raw)
+
+    stat_before = os.stat(args.source_file)
+    size_before, mtime_before = stat_before.st_size, stat_before.st_mtime_ns
+
+    sha256_initial = cc.sha256_file(args.source_file)
+    byte_size = stat_before.st_size
     mime_type = cc.guess_mime(args.source_file)
-    sha256_at_intake = cc.sha256_file(args.source_file)
     acquired_at = cc.utcnow_iso()
 
-    with cc.open_db(config) as conn:
-        duplicate_of = None
-        dup_row = conn.execute(
-            "SELECT evidence_id FROM evidence WHERE sha256 = ? ORDER BY created_at ASC LIMIT 1",
-            (sha256_at_intake,),
-        ).fetchone()
-        if dup_row:
-            duplicate_of = dup_row["evidence_id"]
-
-        evidence_id = cc.next_evidence_id(conn)
-
-        original_path = config.path("01_ORIGINALS", f"{evidence_id}_{original_filename}")
-        working_copy_path = config.path("02_WORKING_COPIES", f"{evidence_id}_{original_filename}")
+    evidence_id = None
+    tmp_path = None
+    try:
+        with cc.open_db(config) as conn:
+            # Atomic reservation: mint evidence_id, derive its paths, and
+            # insert the row — all inside one BEGIN IMMEDIATE transaction
+            # (citadel_core.reserve_evidence). No other process can ever
+            # observe an id or a path without its row, or vice versa.
+            evidence_id, duplicate_of, original_path, working_copy_path = cc.reserve_evidence(
+                conn, config, fs_safe_filename,
+                {
+                    "original_filename": original_filename_raw,
+                    "source": args.source,
+                    "evidence_type": args.evidence_type,
+                    "event_date": args.event_date,
+                    "event_date_precision": args.event_date_precision,
+                    "acquired_at": acquired_at,
+                    "sha256": sha256_initial,
+                    "byte_size": byte_size,
+                    "mime_type": mime_type,
+                    "notes": args.notes,
+                    "actor": ACTOR,
+                },
+            )
 
         if os.path.exists(original_path):
-            # Should be impossible given evidence_id is freshly minted, but
-            # never overwrite an existing original under any circumstance.
-            print(json.dumps({"error": "original_path already exists, aborting", "path": original_path}))
+            # Should be impossible — evidence_id is freshly minted and
+            # unique — but never overwrite an existing original, ever.
+            fail(config, evidence_id, None, "ORIGINAL_PATH_COLLISION",
+                 "original_path already exists, aborting", {"path": original_path})
             return 4
 
-        # Insert the evidence row now, before any file copy, so every
-        # subsequent audit_log/hashes FK reference is valid even if a
-        # later step (e.g. a post-copy hash mismatch) aborts the intake.
-        # That failed attempt then stays visible in the index rather than
-        # vanishing silently.
-        conn.execute(
-            """INSERT INTO evidence (
-                evidence_id, original_filename, source, evidence_type, event_date,
-                event_date_precision, acquired_at, sha256, byte_size, mime_type,
-                original_path, working_copy_path, processing_status, ocr_status,
-                transcription_status, notes, integrity_status, duplicate_of, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (
-                evidence_id, original_filename, args.source, args.evidence_type, args.event_date,
-                args.event_date_precision, acquired_at, sha256_at_intake, byte_size, mime_type,
-                original_path, working_copy_path, "INTAKE_IN_PROGRESS", "NOT_STARTED",
-                "NOT_STARTED", args.notes, "PENDING", duplicate_of, acquired_at,
-            ),
-        )
+        # --- COPYING: stage to a .tmp file, never write directly to the
+        # final original path, so a half-written file can never be
+        # mistaken for a finalized original. ---
+        cc.advance_state(config, evidence_id, "COPYING", ACTOR)
+        tmp_path = config.path("01_ORIGINALS", f".tmp-{evidence_id}")
 
-        import shutil as _shutil
-        _shutil.copy2(args.source_file, original_path)
-        cc.audit(conn, evidence_id, "ORIGINAL_COPIED", ACTOR, {"path": original_path})
+        cc.maybe_inject_fault("copy_failure")
+        cc.maybe_inject_fault("disk_full", cc.disk_full_error())
+        shutil.copy2(args.source_file, tmp_path)
 
-        sha256_post_copy = cc.sha256_file(original_path)
-        if sha256_post_copy != sha256_at_intake:
-            cc.audit(
-                conn, evidence_id, "INTEGRITY_ALERT", ACTOR,
-                {"stage": "post_copy", "expected": sha256_at_intake, "actual": sha256_post_copy},
-            )
-            conn.execute(
-                "UPDATE evidence SET integrity_status = 'INTEGRITY_ALERT', processing_status = 'FAILED' "
-                "WHERE evidence_id = ?",
-                (evidence_id,),
-            )
-            print(json.dumps({"error": "INTEGRITY_ALERT", "message": "hash changed during copy; aborting intake"}))
+        # Test-only, deterministic exercise of the source-mutation check
+        # below: inert unless CITADEL_TEST_FAULT=mutate_source_after_copy
+        # is explicitly set (never true in real use). This mutates the
+        # *source* file the operator supplied — not any evidence this
+        # tool has already taken custody of — purely so the test suite
+        # can prove the check fires without depending on winning a real
+        # microsecond-scale race against a background thread.
+        if os.environ.get(cc.FAULT_ENV_VAR) == "mutate_source_after_copy":
+            with open(args.source_file, "a") as f:
+                f.write("MUTATED-BY-TEST-FAULT-HOOK\n")
+
+        # --- Source-mutation check: did the thing we were copying change
+        # out from under us during the copy? ---
+        stat_after = os.stat(args.source_file)
+        size_after, mtime_after = stat_after.st_size, stat_after.st_mtime_ns
+        if (size_after, mtime_after) != (size_before, mtime_before):
+            fail(config, evidence_id, tmp_path, "SOURCE_CHANGED_DURING_INTAKE",
+                 "source file's size/mtime changed during acquisition; refusing to certify",
+                 {"size_before": size_before, "size_after": size_after,
+                  "mtime_before_ns": mtime_before, "mtime_after_ns": mtime_after})
+            return 6
+
+        # --- HASHING: verify the copy matches what we hashed before
+        # starting (catches copy-stage corruption, distinct from source
+        # mutation above). ---
+        cc.advance_state(config, evidence_id, "HASHING", ACTOR)
+        sha256_post_copy = cc.sha256_file(tmp_path)
+        if sha256_post_copy != sha256_initial:
+            fail(config, evidence_id, tmp_path, "INTEGRITY_ALERT",
+                 "hash changed between source read and copy; aborting intake",
+                 {"expected": sha256_initial, "actual": sha256_post_copy})
             return 5
 
-        cc.audit(conn, evidence_id, "HASH_ORIGINAL", ACTOR, {"sha256": sha256_at_intake})
-
+        # --- Promote tmp -> final original via atomic rename. From this
+        # point on, `original_path` is a real, finalized original and no
+        # failure path may ever delete it. ---
+        os.replace(tmp_path, original_path)
+        tmp_path = None  # now finalized as `original_path`; no longer eligible for cleanup-on-failure
         try:
             os.chmod(original_path, 0o444)
         except OSError:
-            pass  # best-effort; documented as non-authoritative protection
+            pass
+        cc.advance_state(config, evidence_id, "ORIGINAL_VERIFIED", ACTOR, extra_columns={"integrity_status": "OK"})
 
-        _shutil.copy2(original_path, working_copy_path)
+        cc.maybe_inject_fault("working_copy_failure")
+        shutil.copy2(original_path, working_copy_path)
         os.chmod(working_copy_path, 0o644)
-        cc.audit(conn, evidence_id, "WORKING_COPY_CREATED", ACTOR, {"path": working_copy_path})
+        cc.advance_state(config, evidence_id, "WORKING_COPY_CREATED", ACTOR)
 
-        conn.execute(
-            "INSERT INTO hashes (evidence_id, sha256, algo, stage, computed_at) VALUES (?, ?, 'sha256', 'intake', ?)",
-            (evidence_id, sha256_at_intake, acquired_at),
-        )
-
+        cc.maybe_inject_fault("sidecar_write_failure")
         sidecar = {
             "evidence_id": evidence_id,
-            "original_filename": original_filename,
+            "original_filename": original_filename_raw,
             "source": args.source,
             "evidence_type": args.evidence_type,
             "event_date": args.event_date,
             "event_date_precision": args.event_date_precision,
             "acquired_at": acquired_at,
-            "sha256": sha256_at_intake,
+            "sha256": sha256_initial,
             "byte_size": byte_size,
             "mime_type": mime_type,
             "original_path": original_path,
@@ -177,60 +235,71 @@ def main(argv=None):
             "transcription_status": "NOT_STARTED",
             "notes": args.notes,
             "integrity_status": "OK",
+            # Extra, non-minimum-required fields: source-mutation evidence.
+            "source_size_before": size_before,
+            "source_size_after": size_after,
+            "source_mtime_before_ns": mtime_before,
+            "source_mtime_after_ns": mtime_after,
+            "duplicate_of": duplicate_of,
         }
-        cc.write_sidecar(config, evidence_id, sidecar)
-        cc.audit(conn, evidence_id, "SIDECAR_WRITTEN", ACTOR, {"evidence_id": evidence_id})
+        cc.write_intake_sidecar(config, evidence_id, sidecar)
+        cc.advance_state(config, evidence_id, "INDEXED", ACTOR)
 
-        conn.execute(
-            "UPDATE evidence SET processing_status = 'QUEUED', integrity_status = 'OK' "
-            "WHERE evidence_id = ?",
-            (evidence_id,),
-        )
-
-        conn.execute(
-            "INSERT INTO events (evidence_id, event_date, event_date_precision, description, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (evidence_id, args.event_date, args.event_date_precision, args.notes, acquired_at),
-        )
-
-        if duplicate_of:
-            cc.audit(conn, evidence_id, "DUPLICATE_DETECTED", ACTOR, {"duplicate_of": duplicate_of})
-
+        cc.maybe_inject_fault("db_write_failure")
         adapters = cc.detect_adapters()
         queue_status = {}
-        for job_type in cc.ADAPTER_TYPES:
-            applies = cc.ADAPTER_ROUTING[job_type](mime_type)
-            if not applies:
-                continue
-            adapter_info = adapters[job_type]
-            status = "QUEUED" if adapter_info["status"] == "CONNECTED" else "NOT_CONNECTED"
-            now = cc.utcnow_iso()
+        with cc.open_db(config) as conn:
             conn.execute(
-                "INSERT INTO processing_jobs (evidence_id, job_type, status, adapter_status, detail, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (evidence_id, job_type, status, adapter_info["status"], adapter_info["detail"], now, now),
+                "INSERT INTO hashes (evidence_id, sha256, algo, stage, computed_at) "
+                "VALUES (?, ?, 'sha256', 'intake', ?)",
+                (evidence_id, sha256_initial, acquired_at),
             )
-            queue_status[job_type] = status
-        cc.audit(conn, evidence_id, "PROCESSING_JOBS_QUEUED", ACTOR, {"jobs": queue_status})
+            conn.execute(
+                "INSERT INTO events (evidence_id, event_date, event_date_precision, description, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (evidence_id, args.event_date, args.event_date_precision, args.notes, acquired_at),
+            )
+            for job_type in cc.ADAPTER_TYPES:
+                if not cc.ADAPTER_ROUTING[job_type](mime_type):
+                    continue
+                adapter_info = adapters[job_type]
+                status = "QUEUED" if adapter_info["status"] == "CONNECTED" else "NOT_CONNECTED"
+                now = cc.utcnow_iso()
+                conn.execute(
+                    "INSERT INTO processing_jobs (evidence_id, job_type, status, adapter_status, detail, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (evidence_id, job_type, status, adapter_info["status"], adapter_info["detail"], now, now),
+                )
+                queue_status[job_type] = status
+
+        cc.advance_state(config, evidence_id, "QUEUED", ACTOR,
+                          extra_columns={"processing_status": "QUEUED"},
+                          detail={"jobs": queue_status})
 
         receipt = {
             "evidence_id": evidence_id,
-            "sha256": sha256_at_intake,
+            "sha256": sha256_initial,
             "integrity_status": "OK",
             "queue_status": queue_status,
             "duplicate_of": duplicate_of,
         }
-
-        cc.append_intake_log(config, {
+        chain_record = {
             "ts": acquired_at,
             "action": "INTAKE",
             "evidence_id": evidence_id,
-            "original_filename": original_filename,
-            "sha256": sha256_at_intake,
+            "original_filename": original_filename_raw,
+            "sha256": sha256_initial,
             "source": args.source,
             "evidence_type": args.evidence_type,
             "duplicate_of": duplicate_of,
-        })
+        }
+        cc.append_chained_log(config, chain_record)
+
+        cc.advance_state(config, evidence_id, "COMPLETE", ACTOR)
+
+    except Exception as e:  # noqa: BLE001 - deliberate catch-all failure boundary
+        fail(config, evidence_id, tmp_path, "INTAKE_FAILED", str(e), {"exception_type": type(e).__name__})
+        return 10
 
     print(json.dumps(receipt, indent=2))
     return 0

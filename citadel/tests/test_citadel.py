@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Citadel Intake V1 test suite — synthetic fixture only, never touches any
-real evidence tree. Every test runs against a fresh tempfile.TemporaryDirectory
-used as --root / $CITADEL_ROOT, so nothing here can collide with, or even
-see, an operator's actual ~/Citadel.
+Citadel Intake V1.1 — core test suite. Synthetic fixture only, never
+touches any real evidence tree. Every test runs against a fresh
+tempfile.TemporaryDirectory used as --root / $CITADEL_ROOT.
 
-Run:
-    python3 citadel/tests/test_citadel.py
+Run the whole V1.1 suite with:
+    python3 -m unittest discover -s citadel/tests -p "test_*.py" -v
 """
 import json
 import os
@@ -24,9 +23,12 @@ sys.path.insert(0, LIB)
 import citadel_core as cc  # noqa: E402
 
 
-def run(cmd, root):
+def run(cmd, root, env=None):
     full = [sys.executable, os.path.join(BIN, cmd[0]), *cmd[1:], "--root", root]
-    return subprocess.run(full, capture_output=True, text=True)
+    run_env = dict(os.environ)
+    if env:
+        run_env.update(env)
+    return subprocess.run(full, capture_output=True, text=True, env=run_env)
 
 
 class CitadelTestCase(unittest.TestCase):
@@ -35,18 +37,18 @@ class CitadelTestCase(unittest.TestCase):
         self.root = self._tmp.name
 
     def tearDown(self):
-        # Originals are chmod 0o444; TemporaryDirectory cleanup needs write
-        # perms on the containing dirs, which it retains, so this is fine.
         self._tmp.cleanup()
 
-    def intake(self, **kwargs):
-        args = ["citadel-intake", FIXTURE,
+    def intake(self, source_file=FIXTURE, **kwargs):
+        args = ["citadel-intake", source_file,
                 "--source", kwargs.get("source", "Test Harness"),
                 "--evidence-type", kwargs.get("evidence_type", "text"),
                 "--event-date", kwargs.get("event_date", "2026-10-01"),
                 "--event-date-precision", kwargs.get("event_date_precision", "day"),
                 "--notes", kwargs.get("notes", "synthetic test fixture")]
-        result = run(args, self.root)
+        result = run(args, self.root, env=kwargs.get("env"))
+        if kwargs.get("expect_failure"):
+            return result
         self.assertEqual(result.returncode, 0, msg=result.stderr + result.stdout)
         return json.loads(result.stdout)
 
@@ -89,17 +91,28 @@ class TestIntake(CitadelTestCase):
         mode = oct(os.stat(row["original_path"]).st_mode & 0o777)
         self.assertEqual(mode, "0o444")
 
+    def test_no_tmp_file_left_behind_after_successful_intake(self):
+        receipt = self.intake()
+        config = cc.CitadelConfig(root=self.root)
+        tmp_path = config.path("01_ORIGINALS", f".tmp-{receipt['evidence_id']}")
+        self.assertFalse(os.path.exists(tmp_path))
+
+    def test_intake_state_reaches_complete(self):
+        receipt = self.intake()
+        config = cc.CitadelConfig(root=self.root)
+        with cc.open_db(config) as conn:
+            row = conn.execute(
+                "SELECT intake_state FROM evidence WHERE evidence_id = ?", (receipt["evidence_id"],)
+            ).fetchone()
+        self.assertEqual(row["intake_state"], "COMPLETE")
+
 
 class TestIndex(CitadelTestCase):
     def test_db_created_with_all_required_tables(self):
         self.intake()
         config = cc.CitadelConfig(root=self.root)
         with cc.open_db(config) as conn:
-            tables = {
-                r["name"] for r in conn.execute(
-                    "SELECT name FROM sqlite_master WHERE type='table'"
-                )
-            }
+            tables = {r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         for required in ("evidence", "hashes", "events", "processing_jobs", "audit_log"):
             self.assertIn(required, tables)
 
@@ -112,10 +125,16 @@ class TestIndex(CitadelTestCase):
                 (receipt["evidence_id"],),
             ).fetchall()
         job_types = {j["job_type"] for j in jobs}
-        # text/plain only routes to METADATA_EXTRACTION per ADAPTER_ROUTING
         self.assertIn("METADATA_EXTRACTION", job_types)
         meta_job = next(j for j in jobs if j["job_type"] == "METADATA_EXTRACTION")
         self.assertEqual(meta_job["adapter_status"], "CONNECTED")
+
+    def test_wal_mode_is_active(self):
+        config = cc.CitadelConfig(root=self.root)
+        self.intake()
+        with cc.open_db(config) as conn:
+            mode = conn.execute("PRAGMA journal_mode;").fetchone()[0]
+        self.assertEqual(mode.lower(), "wal")
 
 
 class TestVerify(CitadelTestCase):
@@ -128,12 +147,9 @@ class TestVerify(CitadelTestCase):
         self.assertEqual(results[0]["integrity_status"], "OK")
 
     def test_modifying_working_copy_does_not_break_original_verification(self):
-        """
-        Proves the integrity model: mutating the WORKING COPY must never
-        affect the ORIGINAL's verification. We deliberately do NOT touch
-        the original — that would violate the no-intentional-corruption
-        rule for this test suite.
-        """
+        """Mutating the WORKING COPY must never affect the ORIGINAL's
+        verification. We deliberately never touch the original itself —
+        that would violate the no-intentional-corruption rule."""
         receipt = self.intake()
         config = cc.CitadelConfig(root=self.root)
         with cc.open_db(config) as conn:
@@ -152,12 +168,8 @@ class TestVerify(CitadelTestCase):
         self.assertEqual(results[0]["sha256"], receipt["sha256"])
 
     def test_verify_reports_integrity_alert_if_original_file_removed(self):
-        """
-        We never corrupt an original to test this (per the assignment's
-        rule). Simulating *loss* of the original (not tampering with its
-        bytes) is an acceptable, distinct failure mode to exercise, since
-        no evidentiary bytes are altered — the file is simply absent.
-        """
+        """We never corrupt an original's bytes to test this. Simulating
+        loss (not tampering) is a distinct, acceptable failure mode."""
         receipt = self.intake()
         config = cc.CitadelConfig(root=self.root)
         with cc.open_db(config) as conn:
@@ -187,12 +199,19 @@ class TestSidecarValidation(CitadelTestCase):
     def test_sidecar_written_and_has_all_required_fields(self):
         receipt = self.intake()
         config = cc.CitadelConfig(root=self.root)
-        sidecar = cc.read_sidecar(config, receipt["evidence_id"])
-        cc.validate_sidecar(sidecar)  # raises on failure
+        sidecar = cc.read_intake_sidecar(config, receipt["evidence_id"])
+        cc.validate_sidecar(sidecar)
         for field in cc.SIDECAR_FIELDS:
             self.assertIn(field, sidecar)
         self.assertEqual(sidecar["evidence_id"], receipt["evidence_id"])
         self.assertEqual(sidecar["sha256"], receipt["sha256"])
+
+    def test_sidecar_file_is_named_dot_intake_json(self):
+        receipt = self.intake()
+        config = cc.CitadelConfig(root=self.root)
+        path = cc.intake_sidecar_path(config, receipt["evidence_id"])
+        self.assertTrue(path.endswith(".intake.json"))
+        self.assertTrue(os.path.isfile(path))
 
     def test_sidecar_rejects_bad_evidence_type(self):
         bad = {f: "x" for f in cc.SIDECAR_FIELDS}
@@ -208,7 +227,7 @@ class TestSidecarValidation(CitadelTestCase):
 
 
 class TestAuditLog(CitadelTestCase):
-    def test_every_intake_produces_audit_trail(self):
+    def test_every_intake_produces_full_state_audit_trail(self):
         receipt = self.intake()
         config = cc.CitadelConfig(root=self.root)
         with cc.open_db(config) as conn:
@@ -218,9 +237,10 @@ class TestAuditLog(CitadelTestCase):
                     (receipt["evidence_id"],),
                 )
             ]
-        for expected in ("ORIGINAL_COPIED", "HASH_ORIGINAL", "WORKING_COPY_CREATED",
-                          "SIDECAR_WRITTEN", "PROCESSING_JOBS_QUEUED"):
+        for expected in ("RESERVED", "COPYING", "HASHING", "ORIGINAL_VERIFIED",
+                          "WORKING_COPY_CREATED", "INDEXED", "QUEUED", "COMPLETE"):
             self.assertIn(expected, actions)
+        self.assertNotIn("FAILED", actions)
 
     def test_verify_appends_to_audit_log_without_erasing_history(self):
         receipt = self.intake()
@@ -250,15 +270,11 @@ class TestAuditLog(CitadelTestCase):
 
 
 class TestDiskSafetyGate(CitadelTestCase):
-    def test_gate_blocks_intake_when_min_free_gib_is_absurdly_high(self):
-        config_path = os.path.join(self.root, "config.json")
-        with open(config_path, "w") as f:
-            json.dump({"min_free_gib": 999999}, f)
-        # citadel-intake reads config.json from the repo's own config/ dir,
-        # not --root, so we simulate the gate directly via citadel_core
-        # with an overridden config object instead of the CLI.
-        cfg = cc.CitadelConfig(root=self.root)
-        cfg.min_free_gib = 999999
+    def test_core_gate_blocks_when_min_free_gib_is_absurdly_high(self):
+        """Tests the primitive directly. See test_disk_gate_cli.py for the
+        end-to-end CLI test that proves citadel-intake itself refuses and
+        creates nothing."""
+        cfg = cc.CitadelConfig(root=self.root, min_free_gib=999999)
         ok, free_gib, min_gib = cc.check_disk_safety_gate(cfg)
         self.assertFalse(ok)
         self.assertEqual(min_gib, 999999)
@@ -270,8 +286,9 @@ class TestStatus(CitadelTestCase):
         result = run(["citadel-status", "--json"], self.root)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         report = json.loads(result.stdout)
-        for key in ("citadel_root", "disk", "adapters", "evidence", "recent_audit"):
+        for key in ("citadel_root", "disk", "adapters", "db_status", "evidence", "recent_audit", "audit_chain"):
             self.assertIn(key, report)
+        self.assertEqual(report["db_status"], "OK")
         self.assertEqual(report["evidence"]["total"], 1)
         for adapter in cc.ADAPTER_TYPES:
             self.assertIn(adapter, report["adapters"])
