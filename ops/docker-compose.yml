@@ -1,0 +1,186 @@
+version: "3.9"
+name: bella-command-center
+
+networks:
+  edge:
+    driver: bridge
+  internal:
+    driver: bridge
+
+volumes:
+  pg_data:
+  minio_data:
+  opensearch_data:
+  qdrant_data:
+  redis_data:
+  traefik_letsencrypt:
+
+services:
+  traefik:
+    image: traefik:v2.11
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+    ports:
+      - "80:80"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+    networks:
+      - edge
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bcc
+      POSTGRES_PASSWORD: bcc
+      POSTGRES_DB: bcc
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ../db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bcc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - internal
+
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    networks:
+      - internal
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 2; done;
+      mc mb --ignore-existing local/evidence;
+      mc mb --ignore-existing local/exports;
+      mc mb --ignore-existing local/transcripts;
+      mc mb --ignore-existing local/ocr;
+      exit 0;
+      "
+    networks:
+      - internal
+
+  opensearch:
+    image: opensearchproject/opensearch:2.15.0
+    environment:
+      - discovery.type=single-node
+      - DISABLE_SECURITY_PLUGIN=true
+      - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    networks:
+      - internal
+
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.15.0
+    environment:
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
+    depends_on:
+      - opensearch
+    networks:
+      - internal
+
+  qdrant:
+    image: qdrant/qdrant:v1.11.3
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - internal
+
+  redis:
+    image: redis:7.4
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+
+  nats:
+    image: nats:2.10
+    command: "--jetstream"
+    networks:
+      - internal
+
+  tika:
+    image: apache/tika:2.9.1.0
+    networks:
+      - internal
+
+  gotenberg:
+    image: gotenberg/gotenberg:8
+    networks:
+      - internal
+
+  api:
+    build: ../api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      opensearch:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      DATABASE_URL: postgresql://bcc:bcc@postgres:5432/bcc
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      OPENSEARCH_URL: http://opensearch:9200
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      TIKA_URL: http://tika:9998
+      GOTENBERG_URL: http://gotenberg:3000
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=PathPrefix(`/api`)"
+      - "traefik.http.services.api.loadbalancer.server.port=8000"
+    networks:
+      - edge
+      - internal
+
+  worker:
+    build: ../worker
+    environment:
+      DATABASE_URL: postgresql://bcc:bcc@postgres:5432/bcc
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      OPENSEARCH_URL: http://opensearch:9200
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      TIKA_URL: http://tika:9998
+      GOTENBERG_URL: http://gotenberg:3000
+    networks:
+      - internal
+
+  web:
+    build: ../web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=PathPrefix(`/`)"
+      - "traefik.http.services.web.loadbalancer.server.port=3000"
+    networks:
+      - edge
+      - internal

@@ -1,0 +1,7 @@
+[
+  { "field_name": "workspace_id", "field_schema": "keyword" },
+  { "field_name": "evidence_id", "field_schema": "keyword" },
+  { "field_name": "evidence_type", "field_schema": "keyword" },
+  { "field_name": "tags", "field_schema": "keyword" },
+  { "field_name": "event_time_start", "field_schema": "datetime" }
+]

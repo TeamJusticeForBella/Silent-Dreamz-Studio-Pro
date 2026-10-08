@@ -1,0 +1,53 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "analysis": {
+      "analyzer": {
+        "bcc_text": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "asciifolding", "english_stop", "english_stemmer"]
+        }
+      },
+      "filter": {
+        "english_stop": {
+          "type": "stop",
+          "stopwords": "_english_"
+        },
+        "english_stemmer": {
+          "type": "stemmer",
+          "language": "english"
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "workspace_id": { "type": "keyword" },
+      "incident_id": { "type": "keyword" },
+      "title": {
+        "type": "text",
+        "analyzer": "bcc_text",
+        "fields": {
+          "raw": { "type": "keyword" }
+        }
+      },
+      "status": { "type": "keyword" },
+      "summary_md": {
+        "type": "text",
+        "analyzer": "bcc_text"
+      },
+      "narrative_md": {
+        "type": "text",
+        "analyzer": "bcc_text"
+      },
+      "allegation_tags": { "type": "keyword" },
+      "incident_time_start": { "type": "date" },
+      "incident_time_end": { "type": "date" },
+      "created_at": { "type": "date" },
+      "updated_at": { "type": "date" },
+      "evidence_ids": { "type": "keyword" }
+    }
+  }
+}

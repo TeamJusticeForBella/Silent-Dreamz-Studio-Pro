@@ -1,0 +1,72 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0,
+    "analysis": {
+      "analyzer": {
+        "bcc_text": {
+          "type": "custom",
+          "tokenizer": "standard",
+          "filter": ["lowercase", "asciifolding", "english_stop", "english_stemmer"]
+        }
+      },
+      "filter": {
+        "english_stop": {
+          "type": "stop",
+          "stopwords": "_english_"
+        },
+        "english_stemmer": {
+          "type": "stemmer",
+          "language": "english"
+        }
+      }
+    }
+  },
+  "mappings": {
+    "properties": {
+      "workspace_id": { "type": "keyword" },
+      "evidence_id": { "type": "keyword" },
+      "title": {
+        "type": "text",
+        "analyzer": "bcc_text",
+        "fields": {
+          "raw": { "type": "keyword" }
+        }
+      },
+      "evidence_type": { "type": "keyword" },
+      "source_kind": { "type": "keyword" },
+      "sha256": { "type": "keyword" },
+      "content_mime": { "type": "keyword" },
+      "tags": { "type": "keyword" },
+      "is_key_evidence": { "type": "boolean" },
+      "event_time_start": { "type": "date" },
+      "event_time_end": { "type": "date" },
+      "uploaded_at": { "type": "date" },
+      "extracted_text": {
+        "type": "text",
+        "analyzer": "bcc_text"
+      },
+      "ocr_text": {
+        "type": "text",
+        "analyzer": "bcc_text"
+      },
+      "transcript_text": {
+        "type": "text",
+        "analyzer": "bcc_text"
+      },
+      "entities": {
+        "type": "nested",
+        "properties": {
+          "entity_id": { "type": "keyword" },
+          "entity_type": { "type": "keyword" },
+          "canonical_name": { "type": "keyword" },
+          "confidence": { "type": "float" }
+        }
+      },
+      "metadata": {
+        "type": "object",
+        "enabled": true
+      }
+    }
+  }
+}
