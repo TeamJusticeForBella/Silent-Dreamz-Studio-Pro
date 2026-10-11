@@ -137,3 +137,28 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# macOS
+.DS_Store
+
+# Xcode / Swift (EvidenceNexus)
+# xcuserdata and xcuserstate embed local filesystem paths and machine-specific
+# state — never commit them.
+.build/
+.swiftpm/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Evidence / case material
+# This repo must never contain actual case evidence, exports, or private
+# documents. If a path like these appears, it should not be committed.
+*.evidence
+/evidence/
+/private/
+
